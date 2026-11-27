@@ -1024,15 +1024,21 @@ impl ValidateDeviceProfileVendorsAccess {
 #[async_trait]
 impl Validator for ValidateDeviceProfileVendorsAccess {
     async fn validate_user(&self, id: &Uuid) -> Result<i64, Error> {
-        let q = user::table.select(dsl::count_star()).filter(
-            user::id
-                .eq(fields::Uuid::from(id))
-                .and(user::is_active.eq(true)),
-        );
+        let mut q = user::table
+            .select(dsl::count_star())
+            .filter(
+                user::id
+                    .eq(fields::Uuid::from(id))
+                    .and(user::is_active.eq(true)),
+            )
+            .into_boxed();
 
         match self.flag {
             // active user
             Flag::List => {}
+            Flag::Create => {
+                q = q.filter(user::is_admin.eq(true));
+            }
             _ => return Ok(0),
         }
 
@@ -1040,7 +1046,7 @@ impl Validator for ValidateDeviceProfileVendorsAccess {
     }
 
     async fn validate_key(&self, id: &Uuid) -> Result<i64, Error> {
-        let q = api_key::table
+        let mut q = api_key::table
             .select(dsl::count_star())
             .find(fields::Uuid::from(id))
             .into_boxed();
@@ -1048,6 +1054,13 @@ impl Validator for ValidateDeviceProfileVendorsAccess {
         match self.flag {
             // any api key
             Flag::List => {}
+            Flag::Create => {
+                q = q.filter(
+                    api_key::is_admin
+                        .eq(true)
+                        .and(api_key::is_read_only.eq(false)),
+                );
+            }
             _ => return Ok(0),
         }
 
@@ -1081,7 +1094,7 @@ impl Validator for ValidateDeviceProfileVendorAccess {
             // active user
             Flag::Read => {}
             // global admin
-            Flag::Delete => {
+            Flag::Update | Flag::Delete => {
                 q = q.filter(user::is_admin.eq(true));
             }
             _ => return Ok(0),
@@ -1100,7 +1113,7 @@ impl Validator for ValidateDeviceProfileVendorAccess {
             // any api key
             Flag::Read => {}
             // admin api key (not RO)
-            Flag::Delete => {
+            Flag::Update | Flag::Delete => {
                 q = q.filter(
                     api_key::is_admin
                         .eq(true)
@@ -1127,15 +1140,21 @@ impl ValidateDeviceProfileDevicesAccess {
 #[async_trait]
 impl Validator for ValidateDeviceProfileDevicesAccess {
     async fn validate_user(&self, id: &Uuid) -> Result<i64, Error> {
-        let q = user::table.select(dsl::count_star()).filter(
-            user::id
-                .eq(fields::Uuid::from(id))
-                .and(user::is_active.eq(true)),
-        );
+        let mut q = user::table
+            .select(dsl::count_star())
+            .filter(
+                user::id
+                    .eq(fields::Uuid::from(id))
+                    .and(user::is_active.eq(true)),
+            )
+            .into_boxed();
 
         match self.flag {
             // active user
             Flag::List => {}
+            Flag::Create => {
+                q = q.filter(user::is_admin.eq(true));
+            }
             _ => return Ok(0),
         }
 
@@ -1143,7 +1162,7 @@ impl Validator for ValidateDeviceProfileDevicesAccess {
     }
 
     async fn validate_key(&self, id: &Uuid) -> Result<i64, Error> {
-        let q = api_key::table
+        let mut q = api_key::table
             .select(dsl::count_star())
             .find(fields::Uuid::from(id))
             .into_boxed();
@@ -1151,6 +1170,13 @@ impl Validator for ValidateDeviceProfileDevicesAccess {
         match self.flag {
             // any api key
             Flag::List => {}
+            Flag::Create => {
+                q = q.filter(
+                    api_key::is_admin
+                        .eq(true)
+                        .and(api_key::is_read_only.eq(false)),
+                );
+            }
             _ => return Ok(0),
         }
 
@@ -1184,7 +1210,7 @@ impl Validator for ValidateDeviceProfileDeviceAccess {
             // active user
             Flag::Read => {}
             // global admin
-            Flag::Delete => {
+            Flag::Update | Flag::Delete => {
                 q = q.filter(user::is_admin.eq(true));
             }
             _ => return Ok(0),
@@ -1203,7 +1229,7 @@ impl Validator for ValidateDeviceProfileDeviceAccess {
             // any api key
             Flag::Read => {}
             // admin api key
-            Flag::Delete => {
+            Flag::Update | Flag::Delete => {
                 q = q.filter(
                     api_key::is_admin
                         .eq(true)

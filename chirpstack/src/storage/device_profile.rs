@@ -312,8 +312,28 @@ pub async fn get_for_device_id_region_and_fw(
 }
 
 pub async fn update(dp: DeviceProfile) -> Result<DeviceProfile, Error> {
+    update_inner(dp, false).await
+}
+
+// API profile updates must not overwrite a concurrently changed repository link.
+pub async fn update_preserving_repository_link(dp: DeviceProfile) -> Result<DeviceProfile, Error> {
+    update_inner(dp, true).await
+}
+
+async fn update_inner(
+    dp: DeviceProfile,
+    preserve_repository_link: bool,
+) -> Result<DeviceProfile, Error> {
     dp.validate()
         .map_err(|e| Error::Validation(e.to_string()))?;
+
+    let repository_changes = (!preserve_repository_link).then(|| {
+        (
+            device_profile::device_id.eq(&dp.device_id),
+            device_profile::firmware_version.eq(&dp.firmware_version),
+            device_profile::vendor_profile_id.eq(&dp.vendor_profile_id),
+        )
+    });
 
     let dp: DeviceProfile = diesel::update(device_profile::dsl::device_profile.find(&dp.id))
         .set((
@@ -343,9 +363,7 @@ pub async fn update(dp: DeviceProfile) -> Result<DeviceProfile, Error> {
             device_profile::class_c_params.eq(&dp.class_c_params),
             device_profile::relay_params.eq(&dp.relay_params),
             device_profile::app_layer_params.eq(&dp.app_layer_params),
-            device_profile::device_id.eq(&dp.device_id),
-            device_profile::firmware_version.eq(&dp.firmware_version),
-            device_profile::vendor_profile_id.eq(&dp.vendor_profile_id),
+            repository_changes,
             device_profile::supported_uplink_data_rates.eq(&dp.supported_uplink_data_rates),
         ))
         .get_result(&mut get_async_db_conn().await?)
@@ -364,6 +382,30 @@ pub async fn set_measurements(id: Uuid, m: &fields::Measurements) -> Result<Devi
             .await
             .map_err(|e| Error::from_diesel(e, id.to_string()))?;
     info!(id = %id, "Device-profile measurements updated");
+    Ok(dp)
+}
+
+pub async fn set_repository_link(
+    id: Uuid,
+    device_id: Option<Uuid>,
+    firmware_version: &str,
+    vendor_profile_id: i32,
+) -> Result<DeviceProfile, Error> {
+    let dp: DeviceProfile = diesel::update(
+        device_profile::table
+            .find(fields::Uuid::from(id))
+            .filter(device_profile::tenant_id.is_null()),
+    )
+    .set((
+        device_profile::updated_at.eq(Utc::now()),
+        device_profile::device_id.eq(device_id.map(fields::Uuid::from)),
+        device_profile::firmware_version.eq(firmware_version),
+        device_profile::vendor_profile_id.eq(vendor_profile_id),
+    ))
+    .get_result(&mut get_async_db_conn().await?)
+    .await
+    .map_err(|e| Error::from_diesel(e, id.to_string()))?;
+    info!(id = %id, "Device-profile repository link updated");
     Ok(dp)
 }
 
@@ -543,6 +585,28 @@ pub async fn list(
     Ok(items)
 }
 
+pub async fn create_vendor(v: Vendor) -> Result<Vendor, Error> {
+    diesel::insert_into(device_profile_vendor::table)
+        .values(&v)
+        .get_result(&mut get_async_db_conn().await?)
+        .await
+        .map_err(|e| Error::from_diesel(e, v.id.to_string()))
+}
+
+pub async fn update_vendor(v: Vendor) -> Result<Vendor, Error> {
+    diesel::update(device_profile_vendor::table.find(&v.id))
+        .set((
+            device_profile_vendor::updated_at.eq(Utc::now()),
+            device_profile_vendor::name.eq(&v.name),
+            device_profile_vendor::vendor_id.eq(v.vendor_id),
+            device_profile_vendor::ouis.eq(&v.ouis),
+            device_profile_vendor::metadata.eq(&v.metadata),
+        ))
+        .get_result(&mut get_async_db_conn().await?)
+        .await
+        .map_err(|e| Error::from_diesel(e, v.id.to_string()))
+}
+
 pub async fn upsert_vendor(v: Vendor) -> Result<Vendor, Error> {
     let v: Vendor = diesel::insert_into(device_profile_vendor::table)
         .values(&v)
@@ -639,6 +703,28 @@ pub async fn delete_vendor(id: uuid::Uuid) -> Result<(), Error> {
 
     info!(id = %id, "Device-profile vendor deleted");
     Ok(())
+}
+
+pub async fn create_device(d: Device) -> Result<Device, Error> {
+    diesel::insert_into(device_profile_device::table)
+        .values(&d)
+        .get_result(&mut get_async_db_conn().await?)
+        .await
+        .map_err(|e| Error::from_diesel(e, d.id.to_string()))
+}
+
+pub async fn update_device(d: Device) -> Result<Device, Error> {
+    diesel::update(device_profile_device::table.find(&d.id))
+        .set((
+            device_profile_device::updated_at.eq(Utc::now()),
+            device_profile_device::vendor_id.eq(&d.vendor_id),
+            device_profile_device::name.eq(&d.name),
+            device_profile_device::description.eq(&d.description),
+            device_profile_device::metadata.eq(&d.metadata),
+        ))
+        .get_result(&mut get_async_db_conn().await?)
+        .await
+        .map_err(|e| Error::from_diesel(e, d.id.to_string()))
 }
 
 pub async fn upsert_device(d: Device) -> Result<Device, Error> {

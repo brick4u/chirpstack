@@ -454,7 +454,7 @@ impl DeviceProfileService for DeviceProfile {
         let existing = device_profile::get(&dp_id).await.map_err(|e| e.status())?;
 
         // update
-        let _ = device_profile::update(device_profile::DeviceProfile {
+        let _ = device_profile::update_preserving_repository_link(device_profile::DeviceProfile {
             id: dp_id.into(),
             name: req_dp.name.clone(),
             description: req_dp.description.clone(),
@@ -729,6 +729,62 @@ impl DeviceProfileService for DeviceProfile {
         }))
     }
 
+    async fn create_vendor(
+        &self,
+        request: Request<api::CreateDeviceProfileVendorRequest>,
+    ) -> Result<Response<api::CreateDeviceProfileVendorResponse>, Status> {
+        self.validator
+            .validate(
+                request.extensions(),
+                validator::ValidateDeviceProfileVendorsAccess::new(validator::Flag::Create),
+            )
+            .await?;
+        let vendor = request
+            .get_ref()
+            .vendor
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("vendor is missing"))?;
+        let vendor = device_profile::create_vendor(vendor_from_api(vendor)?)
+            .await
+            .map_err(|e| e.status())?;
+        let mut response = Response::new(api::CreateDeviceProfileVendorResponse {
+            id: vendor.id.to_string(),
+        });
+        response
+            .metadata_mut()
+            .insert("x-log-vendor_id", vendor.id.to_string().parse().unwrap());
+        Ok(response)
+    }
+
+    async fn update_vendor(
+        &self,
+        request: Request<api::UpdateDeviceProfileVendorRequest>,
+    ) -> Result<Response<()>, Status> {
+        self.validator
+            .validate(
+                request.extensions(),
+                validator::ValidateDeviceProfileVendorAccess::new(validator::Flag::Update),
+            )
+            .await?;
+        let vendor = request
+            .get_ref()
+            .vendor
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("vendor is missing"))?;
+        let id = Uuid::from_str(&vendor.id).map_err(|e| e.status())?;
+        device_profile::update_vendor(device_profile::Vendor {
+            id: id.into(),
+            ..vendor_from_api(vendor)?
+        })
+        .await
+        .map_err(|e| e.status())?;
+        let mut response = Response::new(());
+        response
+            .metadata_mut()
+            .insert("x-log-vendor_id", id.to_string().parse().unwrap());
+        Ok(response)
+    }
+
     async fn get_vendor(
         &self,
         request: Request<api::GetDeviceProfileVendorRequest>,
@@ -794,6 +850,122 @@ impl DeviceProfileService for DeviceProfile {
             .insert("x-log-vendor_id", req.id.parse().unwrap());
 
         Ok(resp)
+    }
+
+    async fn create_device(
+        &self,
+        request: Request<api::CreateDeviceProfileDeviceRequest>,
+    ) -> Result<Response<api::CreateDeviceProfileDeviceResponse>, Status> {
+        self.validator
+            .validate(
+                request.extensions(),
+                validator::ValidateDeviceProfileDevicesAccess::new(validator::Flag::Create),
+            )
+            .await?;
+        let device = request
+            .get_ref()
+            .device
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("device is missing"))?;
+        let device = device_from_api(device)?;
+        device_profile::get_vendor(*device.vendor_id)
+            .await
+            .map_err(|e| e.status())?;
+        let device = device_profile::create_device(device)
+            .await
+            .map_err(|e| e.status())?;
+        let mut response = Response::new(api::CreateDeviceProfileDeviceResponse {
+            id: device.id.to_string(),
+        });
+        response
+            .metadata_mut()
+            .insert("x-log-device_id", device.id.to_string().parse().unwrap());
+        Ok(response)
+    }
+
+    async fn update_device(
+        &self,
+        request: Request<api::UpdateDeviceProfileDeviceRequest>,
+    ) -> Result<Response<()>, Status> {
+        self.validator
+            .validate(
+                request.extensions(),
+                validator::ValidateDeviceProfileDeviceAccess::new(validator::Flag::Update),
+            )
+            .await?;
+        let device = request
+            .get_ref()
+            .device
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("device is missing"))?;
+        let id = Uuid::from_str(&device.id).map_err(|e| e.status())?;
+        let device = device_profile::Device {
+            id: id.into(),
+            ..device_from_api(device)?
+        };
+        device_profile::get_vendor(*device.vendor_id)
+            .await
+            .map_err(|e| e.status())?;
+        device_profile::update_device(device)
+            .await
+            .map_err(|e| e.status())?;
+        let mut response = Response::new(());
+        response
+            .metadata_mut()
+            .insert("x-log-device_id", id.to_string().parse().unwrap());
+        Ok(response)
+    }
+
+    async fn set_repository_link(
+        &self,
+        request: Request<api::SetDeviceProfileRepositoryLinkRequest>,
+    ) -> Result<Response<()>, Status> {
+        self.validator
+            .validate(
+                request.extensions(),
+                validator::ValidateDeviceProfileVendorAccess::new(validator::Flag::Update),
+            )
+            .await?;
+        let req = request.get_ref();
+        let id = Uuid::from_str(&req.id).map_err(|e| e.status())?;
+        let existing = device_profile::get(&id).await.map_err(|e| e.status())?;
+        if existing.tenant_id.is_some() {
+            return Err(Status::failed_precondition(
+                "repository links can only be changed on global device-profiles",
+            ));
+        }
+        if req.vendor_profile_id > u16::MAX as u32 {
+            return Err(Status::invalid_argument(
+                "vendor_profile_id must be 0..65535",
+            ));
+        }
+        let device_id = if req.device_id.is_empty() {
+            if !req.firmware_version.is_empty() || req.vendor_profile_id != 0 {
+                return Err(Status::invalid_argument(
+                    "clearing a link requires empty firmware_version and zero vendor_profile_id",
+                ));
+            }
+            None
+        } else {
+            let device_id = Uuid::from_str(&req.device_id).map_err(|e| e.status())?;
+            device_profile::get_device(device_id)
+                .await
+                .map_err(|e| e.status())?;
+            Some(device_id)
+        };
+        device_profile::set_repository_link(
+            id,
+            device_id,
+            &req.firmware_version,
+            req.vendor_profile_id as i32,
+        )
+        .await
+        .map_err(|e| e.status())?;
+        let mut response = Response::new(());
+        response
+            .metadata_mut()
+            .insert("x-log-device_profile_id", id.to_string().parse().unwrap());
+        Ok(response)
     }
 
     async fn get_device(
@@ -927,6 +1099,39 @@ impl DeviceProfileService for DeviceProfile {
         }))
     }
 }
+
+fn vendor_from_api(vendor: &api::DeviceProfileVendor) -> Result<device_profile::Vendor, Status> {
+    if vendor.name.trim().is_empty() {
+        return Err(Status::invalid_argument("vendor name must not be empty"));
+    }
+    Ok(device_profile::Vendor {
+        name: vendor.name.clone(),
+        vendor_id: i32::try_from(vendor.vendor_id)
+            .map_err(|_| Status::invalid_argument("vendor_id is too large"))?,
+        ouis: fields::StringVec::new(vendor.ouis.iter().cloned().map(Some).collect()),
+        metadata: fields::KeyValue::new(vendor.metadata.clone()),
+        ..Default::default()
+    })
+}
+
+fn device_from_api(device: &api::DeviceProfileDevice) -> Result<device_profile::Device, Status> {
+    if device.name.trim().is_empty() {
+        return Err(Status::invalid_argument("device name must not be empty"));
+    }
+    Ok(device_profile::Device {
+        vendor_id: Uuid::from_str(&device.vendor_id)
+            .map_err(|e| e.status())?
+            .into(),
+        name: device.name.clone(),
+        description: device.description.clone(),
+        metadata: fields::KeyValue::new(device.metadata.clone()),
+        ..Default::default()
+    })
+}
+
+#[cfg(test)]
+#[path = "device_profile_catalog_test.rs"]
+mod catalog_test;
 
 #[cfg(test)]
 pub mod test {
