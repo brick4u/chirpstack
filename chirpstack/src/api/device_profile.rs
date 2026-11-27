@@ -953,6 +953,11 @@ impl DeviceProfileService for DeviceProfile {
                 .map_err(|e| e.status())?;
             Some(device_id)
         };
+        if req.firmware_version.chars().count() > 20 {
+            return Err(Status::invalid_argument(
+                "firmware_version must not exceed 20 characters",
+            ));
+        }
         device_profile::set_repository_link(
             id,
             device_id,
