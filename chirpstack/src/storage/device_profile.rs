@@ -17,6 +17,57 @@ use super::{error, fields, get_async_db_conn};
 use crate::api::helpers::ToProto;
 use crate::codec::Codec;
 
+#[cfg(feature = "postgres")]
+type CatalogConnection = diesel_async::AsyncPgConnection;
+#[cfg(feature = "sqlite")]
+type CatalogConnection =
+    diesel_async::sync_connection_wrapper::SyncConnectionWrapper<diesel::SqliteConnection>;
+
+// Serialize catalog API writes across server instances. SQLite's write_transaction!
+// uses BEGIN IMMEDIATE instead. Importer writes deliberately remain unchanged;
+// API management and repository imports are alternative operating modes.
+async fn lock_catalog(_c: &mut CatalogConnection) -> Result<(), Error> {
+    #[cfg(feature = "postgres")]
+    diesel_async::SimpleAsyncConnection::batch_execute(
+        _c,
+        "SELECT pg_advisory_xact_lock(7640071201071)",
+    )
+    .await?;
+    Ok(())
+}
+
+// Called after a tentative change, within the same locked transaction. Any
+// conflict rolls the change back, including changes to a model or vendor.
+async fn validate_tr005_assignments(
+    c: &mut CatalogConnection,
+    vendor_id: i32,
+) -> Result<(), Error> {
+    let duplicate: Option<i32> = device_profile::table
+        .inner_join(
+            device_profile_device::table.on(device_profile::device_id
+                .assume_not_null()
+                .eq(device_profile_device::id)),
+        )
+        .inner_join(
+            device_profile_vendor::table
+                .on(device_profile_device::vendor_id.eq(device_profile_vendor::id)),
+        )
+        .filter(device_profile_vendor::vendor_id.eq(vendor_id))
+        .filter(device_profile::vendor_profile_id.ne(0))
+        .group_by(device_profile::vendor_profile_id)
+        .having(dsl::count_star().gt(1))
+        .select(device_profile::vendor_profile_id)
+        .first(c)
+        .await
+        .optional()?;
+    if let Some(profile_id) = duplicate {
+        return Err(Error::AlreadyExists(format!(
+            "TR005 vendor_id {vendor_id}, vendor_profile_id {profile_id}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Queryable, Insertable, Debug, PartialEq, Eq)]
 #[diesel(table_name = device_profile_vendor)]
 pub struct Vendor {
@@ -261,7 +312,11 @@ pub async fn get_by_profile_id(
     vendor_id: i32,
     vendor_profile_id: i32,
 ) -> Result<DeviceProfile, Error> {
-    let dp = device_profile::table
+    let key = format!("Vendor ID: {vendor_id}, Vendor Profile ID: {vendor_profile_id}");
+    if vendor_profile_id == 0 {
+        return Err(Error::NotFound(key));
+    }
+    let mut profiles: Vec<DeviceProfile> = device_profile::table
         .inner_join(
             device_profile_device::table.on(device_profile::device_id
                 .assume_not_null()
@@ -277,19 +332,16 @@ pub async fn get_by_profile_id(
                 .eq(&vendor_id)
                 .and(device_profile::vendor_profile_id.eq(&vendor_profile_id)),
         )
-        .first(&mut get_async_db_conn().await?)
-        .await
-        .map_err(|e| {
-            Error::from_diesel(
-                e,
-                format!(
-                    "Vendor ID: {}, Vendor Profile ID: {}",
-                    vendor_id, vendor_profile_id
-                ),
-            )
-        })?;
-
-    Ok(dp)
+        .limit(2)
+        .load(&mut get_async_db_conn().await?)
+        .await?;
+    match profiles.len() {
+        0 => Err(Error::NotFound(key)),
+        1 => Ok(profiles.remove(0)),
+        _ => Err(Error::FailedPrecondition(format!(
+            "Ambiguous TR005 assignment ({key})"
+        ))),
+    }
 }
 
 pub async fn get_for_device_id_region_and_fw(
@@ -312,8 +364,28 @@ pub async fn get_for_device_id_region_and_fw(
 }
 
 pub async fn update(dp: DeviceProfile) -> Result<DeviceProfile, Error> {
+    update_inner(dp, false).await
+}
+
+// API profile updates must not overwrite a concurrently changed repository link.
+pub async fn update_preserving_repository_link(dp: DeviceProfile) -> Result<DeviceProfile, Error> {
+    update_inner(dp, true).await
+}
+
+async fn update_inner(
+    dp: DeviceProfile,
+    preserve_repository_link: bool,
+) -> Result<DeviceProfile, Error> {
     dp.validate()
         .map_err(|e| Error::Validation(e.to_string()))?;
+
+    let repository_changes = (!preserve_repository_link).then(|| {
+        (
+            device_profile::device_id.eq(&dp.device_id),
+            device_profile::firmware_version.eq(&dp.firmware_version),
+            device_profile::vendor_profile_id.eq(&dp.vendor_profile_id),
+        )
+    });
 
     let dp: DeviceProfile = diesel::update(device_profile::dsl::device_profile.find(&dp.id))
         .set((
@@ -343,9 +415,7 @@ pub async fn update(dp: DeviceProfile) -> Result<DeviceProfile, Error> {
             device_profile::class_c_params.eq(&dp.class_c_params),
             device_profile::relay_params.eq(&dp.relay_params),
             device_profile::app_layer_params.eq(&dp.app_layer_params),
-            device_profile::device_id.eq(&dp.device_id),
-            device_profile::firmware_version.eq(&dp.firmware_version),
-            device_profile::vendor_profile_id.eq(&dp.vendor_profile_id),
+            repository_changes,
             device_profile::supported_uplink_data_rates.eq(&dp.supported_uplink_data_rates),
         ))
         .get_result(&mut get_async_db_conn().await?)
@@ -364,6 +434,52 @@ pub async fn set_measurements(id: Uuid, m: &fields::Measurements) -> Result<Devi
             .await
             .map_err(|e| Error::from_diesel(e, id.to_string()))?;
     info!(id = %id, "Device-profile measurements updated");
+    Ok(dp)
+}
+
+pub async fn set_repository_link(
+    id: Uuid,
+    device_id: Option<Uuid>,
+    firmware_version: &str,
+    vendor_profile_id: i32,
+) -> Result<DeviceProfile, Error> {
+    let mut c = get_async_db_conn().await?;
+    let dp = write_transaction!(c, DeviceProfile, async |c| {
+        lock_catalog(c).await?;
+        let vendor_id: Option<i32> = if let Some(device_id) = device_id {
+            Some(
+                device_profile_device::table
+                    .inner_join(device_profile_vendor::table)
+                    .filter(device_profile_device::id.eq(fields::Uuid::from(device_id)))
+                    .select(device_profile_vendor::vendor_id)
+                    .first(c)
+                    .await
+                    .map_err(|e| Error::from_diesel(e, device_id.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let dp: DeviceProfile = diesel::update(
+            device_profile::table
+                .find(fields::Uuid::from(id))
+                .filter(device_profile::tenant_id.is_null()),
+        )
+        .set((
+            device_profile::updated_at.eq(Utc::now()),
+            device_profile::device_id.eq(device_id.map(fields::Uuid::from)),
+            device_profile::firmware_version.eq(firmware_version),
+            device_profile::vendor_profile_id.eq(vendor_profile_id),
+        ))
+        .get_result(c)
+        .await
+        .map_err(|e| Error::from_diesel(e, id.to_string()))?;
+        if let Some(vendor_id) = vendor_id {
+            validate_tr005_assignments(c, vendor_id).await?;
+        }
+        Ok(dp)
+    })
+    .await?;
+    info!(id = %id, "Device-profile repository link updated");
     Ok(dp)
 }
 
@@ -543,6 +659,42 @@ pub async fn list(
     Ok(items)
 }
 
+pub async fn create_vendor(v: Vendor) -> Result<Vendor, Error> {
+    diesel::insert_into(device_profile_vendor::table)
+        .values(&v)
+        .get_result(&mut get_async_db_conn().await?)
+        .await
+        .map_err(|e| Error::from_diesel(e, v.id.to_string()))
+}
+
+pub async fn update_vendor(v: Vendor) -> Result<Vendor, Error> {
+    let mut c = get_async_db_conn().await?;
+    write_transaction!(c, Vendor, async |c| {
+        lock_catalog(c).await?;
+        let previous: Vendor = device_profile_vendor::table
+            .find(&v.id)
+            .first(c)
+            .await
+            .map_err(|e| Error::from_diesel(e, v.id.to_string()))?;
+        let updated = diesel::update(device_profile_vendor::table.find(&v.id))
+            .set((
+                device_profile_vendor::updated_at.eq(Utc::now()),
+                device_profile_vendor::name.eq(&v.name),
+                device_profile_vendor::vendor_id.eq(v.vendor_id),
+                device_profile_vendor::ouis.eq(&v.ouis),
+                device_profile_vendor::metadata.eq(&v.metadata),
+            ))
+            .get_result(c)
+            .await
+            .map_err(|e| Error::from_diesel(e, v.id.to_string()))?;
+        if previous.vendor_id != v.vendor_id {
+            validate_tr005_assignments(c, v.vendor_id).await?;
+        }
+        Ok(updated)
+    })
+    .await
+}
+
 pub async fn upsert_vendor(v: Vendor) -> Result<Vendor, Error> {
     let v: Vendor = diesel::insert_into(device_profile_vendor::table)
         .values(&v)
@@ -629,16 +781,76 @@ pub async fn get_vendor(id: Uuid) -> Result<Vendor, Error> {
 }
 
 pub async fn delete_vendor(id: uuid::Uuid) -> Result<(), Error> {
-    let ra = diesel::delete(device_profile_vendor::table.find(&fields::Uuid::from(id)))
-        .execute(&mut get_async_db_conn().await?)
-        .await?;
+    let mut c = get_async_db_conn().await?;
+    write_transaction!(c, (), async |c| {
+        lock_catalog(c).await?;
+        let linked: i64 = device_profile::table
+            .inner_join(
+                device_profile_device::table.on(device_profile::device_id
+                    .assume_not_null()
+                    .eq(device_profile_device::id)),
+            )
+            .filter(device_profile_device::vendor_id.eq(fields::Uuid::from(id)))
+            .count()
+            .get_result(c)
+            .await?;
+        if linked != 0 {
+            return Err(Error::FailedPrecondition(
+                "Unlink all device-profiles before deleting their vendor".into(),
+            ));
+        }
+        let ra = diesel::delete(device_profile_vendor::table.find(&fields::Uuid::from(id)))
+            .execute(c)
+            .await?;
 
-    if ra == 0 {
-        return Err(Error::NotFound(id.to_string()));
-    }
+        if ra == 0 {
+            return Err(Error::NotFound(id.to_string()));
+        }
 
-    info!(id = %id, "Device-profile vendor deleted");
-    Ok(())
+        info!(id = %id, "Device-profile vendor deleted");
+        Ok(())
+    })
+    .await
+}
+
+pub async fn create_device(d: Device) -> Result<Device, Error> {
+    diesel::insert_into(device_profile_device::table)
+        .values(&d)
+        .get_result(&mut get_async_db_conn().await?)
+        .await
+        .map_err(|e| Error::from_diesel(e, d.id.to_string()))
+}
+
+pub async fn update_device(d: Device) -> Result<Device, Error> {
+    let mut c = get_async_db_conn().await?;
+    write_transaction!(c, Device, async |c| {
+        lock_catalog(c).await?;
+        let previous: Device = device_profile_device::table
+            .find(&d.id)
+            .first(c)
+            .await
+            .map_err(|e| Error::from_diesel(e, d.id.to_string()))?;
+        let updated = diesel::update(device_profile_device::table.find(&d.id))
+            .set((
+                device_profile_device::updated_at.eq(Utc::now()),
+                device_profile_device::vendor_id.eq(&d.vendor_id),
+                device_profile_device::name.eq(&d.name),
+                device_profile_device::description.eq(&d.description),
+                device_profile_device::metadata.eq(&d.metadata),
+            ))
+            .get_result(c)
+            .await
+            .map_err(|e| Error::from_diesel(e, d.id.to_string()))?;
+        if previous.vendor_id != d.vendor_id {
+            let vendor: Vendor = device_profile_vendor::table
+                .find(&d.vendor_id)
+                .first(c)
+                .await?;
+            validate_tr005_assignments(c, vendor.vendor_id).await?;
+        }
+        Ok(updated)
+    })
+    .await
 }
 
 pub async fn upsert_device(d: Device) -> Result<Device, Error> {
@@ -662,16 +874,31 @@ pub async fn upsert_device(d: Device) -> Result<Device, Error> {
 }
 
 pub async fn delete_device(id: uuid::Uuid) -> Result<(), Error> {
-    let ra = diesel::delete(device_profile_device::table.find(&fields::Uuid::from(id)))
-        .execute(&mut get_async_db_conn().await?)
-        .await?;
+    let mut c = get_async_db_conn().await?;
+    write_transaction!(c, (), async |c| {
+        lock_catalog(c).await?;
+        let linked: i64 = device_profile::table
+            .filter(device_profile::device_id.eq(fields::Uuid::from(id)))
+            .count()
+            .get_result(c)
+            .await?;
+        if linked != 0 {
+            return Err(Error::FailedPrecondition(
+                "Unlink all device-profiles before deleting their model".into(),
+            ));
+        }
+        let ra = diesel::delete(device_profile_device::table.find(&fields::Uuid::from(id)))
+            .execute(c)
+            .await?;
 
-    if ra == 0 {
-        return Err(Error::NotFound(id.to_string()));
-    }
+        if ra == 0 {
+            return Err(Error::NotFound(id.to_string()));
+        }
 
-    info!(id = %id, "Device-profile device deleted");
-    Ok(())
+        info!(id = %id, "Device-profile device deleted");
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]

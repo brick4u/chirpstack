@@ -39,7 +39,11 @@ pub async fn prepare<'a>() -> std::sync::MutexGuard<'a, ()> {
     let mut conf: config::Configuration = Default::default();
     conf.postgresql.dsn = env::var("TEST_POSTGRESQL_DSN").unwrap();
     conf.redis.servers = vec![env::var("TEST_REDIS_URL").unwrap()];
-    conf.sqlite.path = ":memory:".to_string();
+    // Preserve the fresh-database-per-test behavior of :memory:, while allowing
+    // pooled connections in concurrency tests to share one file-backed DB.
+    conf.sqlite.path = env::var("TEST_SQLITE_PATH")
+        .map(|prefix| format!("{prefix}-{}", uuid::Uuid::new_v4()))
+        .unwrap_or_else(|_| ":memory:".to_string());
     conf.network.enabled_regions = vec!["eu868".to_string()];
     conf.network.scheduler.class_b_schedule_advance = Duration::from_secs(128 * 2);
     conf.regions = vec![config::Region {
