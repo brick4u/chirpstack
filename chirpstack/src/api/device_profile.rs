@@ -1123,6 +1123,11 @@ fn device_from_api(device: &api::DeviceProfileDevice) -> Result<device_profile::
     if device.name.trim().is_empty() {
         return Err(Status::invalid_argument("device name must not be empty"));
     }
+    if device.name.chars().count() > 100 {
+        return Err(Status::invalid_argument(
+            "device name must not exceed 100 characters",
+        ));
+    }
     Ok(device_profile::Device {
         vendor_id: Uuid::from_str(&device.vendor_id)
             .map_err(|e| e.status())?
