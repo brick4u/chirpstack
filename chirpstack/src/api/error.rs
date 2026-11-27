@@ -13,6 +13,9 @@ impl ToStatus for storage::error::Error {
             storage::error::Error::AlreadyExists(_) => {
                 Status::new(Code::AlreadyExists, format!("{:#}", self))
             }
+            storage::error::Error::FailedPrecondition(_) => {
+                Status::new(Code::FailedPrecondition, format!("{:#}", self))
+            }
             storage::error::Error::InvalidEmail => {
                 Status::new(Code::InvalidArgument, format!("{:#}", self))
             }

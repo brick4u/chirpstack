@@ -555,6 +555,10 @@ message DeviceProfile {
   // ChirpStack might schedule a Class-B ping-slot downlink but before this is
   // transmitted by the gateway, it also responsed with a Class-A downlink.
   bool class_b_downlink_only = 58;
+
+  // TR005 vendor profile ID (read-only; use SetRepositoryLink to change).
+  // Zero means unassigned and cannot be resolved through GetByProfileId.
+  uint32 vendor_profile_id = 59;
 }
 
 message Measurement {

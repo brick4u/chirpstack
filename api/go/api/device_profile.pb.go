@@ -734,8 +734,11 @@ type DeviceProfile struct {
 	// ChirpStack might schedule a Class-B ping-slot downlink but before this is
 	// transmitted by the gateway, it also responsed with a Class-A downlink.
 	ClassBDownlinkOnly bool `protobuf:"varint,58,opt,name=class_b_downlink_only,json=classBDownlinkOnly,proto3" json:"class_b_downlink_only,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// TR005 vendor profile ID (read-only; use SetRepositoryLink to change).
+	// Zero means unassigned and cannot be resolved through GetByProfileId.
+	VendorProfileId uint32 `protobuf:"varint,59,opt,name=vendor_profile_id,json=vendorProfileId,proto3" json:"vendor_profile_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *DeviceProfile) Reset() {
@@ -1172,6 +1175,13 @@ func (x *DeviceProfile) GetClassBDownlinkOnly() bool {
 		return x.ClassBDownlinkOnly
 	}
 	return false
+}
+
+func (x *DeviceProfile) GetVendorProfileId() uint32 {
+	if x != nil {
+		return x.VendorProfileId
+	}
+	return 0
 }
 
 type Measurement struct {
@@ -3380,7 +3390,7 @@ var File_api_device_profile_proto protoreflect.FileDescriptor
 
 const file_api_device_profile_proto_rawDesc = "" +
 	"\n" +
-	"\x18api/device_profile.proto\x12\x03api\x1a\x13common/common.proto\x1a\x1cgoogle/api/annotations.proto\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf8\x18\n" +
+	"\x18api/device_profile.proto\x12\x03api\x1a\x13common/common.proto\x1a\x1cgoogle/api/annotations.proto\x1a\x1bgoogle/protobuf/empty.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa4\x19\n" +
 	"\rDeviceProfile\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x12\n" +
@@ -3443,7 +3453,8 @@ const file_api_device_profile_proto_rawDesc = "" +
 	"\tdevice_id\x187 \x01(\tR\bdeviceId\x12)\n" +
 	"\x10firmware_version\x188 \x01(\tR\x0ffirmwareVersion\x12=\n" +
 	"\x1bsupported_uplink_data_rates\x189 \x03(\rR\x18supportedUplinkDataRates\x121\n" +
-	"\x15class_b_downlink_only\x18: \x01(\bR\x12classBDownlinkOnly\x1a7\n" +
+	"\x15class_b_downlink_only\x18: \x01(\bR\x12classBDownlinkOnly\x12*\n" +
+	"\x11vendor_profile_id\x18; \x01(\rR\x0fvendorProfileId\x1a7\n" +
 	"\tTagsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aQ\n" +

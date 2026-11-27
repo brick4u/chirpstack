@@ -9,6 +9,9 @@ pub enum Error {
     #[error("Object already exists (id: {0})")]
     AlreadyExists(String),
 
+    #[error("Operation requires a different state: {0}")]
+    FailedPrecondition(String),
+
     #[error("Invalid email address format")]
     InvalidEmail,
 

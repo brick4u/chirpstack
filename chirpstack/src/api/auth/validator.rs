@@ -1355,6 +1355,28 @@ impl Validator for ValidateDeviceProfilesAccess {
     }
 }
 
+// Shared catalog links are writable only by active global administrators or
+// writable administrator API keys, even when the target profile is tenant-owned.
+// The handler separately rejects tenant-owned targets with FAILED_PRECONDITION.
+pub struct ValidateDeviceProfileRepositoryLinkAccess;
+
+#[async_trait]
+impl Validator for ValidateDeviceProfileRepositoryLinkAccess {
+    async fn validate_user(&self, id: &Uuid) -> Result<i64, Error> {
+        ValidateIsAdmin::new().validate_user(id).await
+    }
+
+    async fn validate_key(&self, id: &Uuid) -> Result<i64, Error> {
+        Ok(api_key::table
+            .filter(api_key::id.eq(fields::Uuid::from(id)))
+            .filter(api_key::is_admin.eq(true))
+            .filter(api_key::is_read_only.eq(false))
+            .count()
+            .get_result(&mut get_async_db_conn().await?)
+            .await?)
+    }
+}
+
 pub struct ValidateDeviceProfileAccess {
     flag: Flag,
     device_profile_id: Uuid,

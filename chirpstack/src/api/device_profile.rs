@@ -289,6 +289,7 @@ impl DeviceProfileService for DeviceProfile {
                 }),
                 device_id: dp.device_id.map(|v| v.to_string()).unwrap_or_default(),
                 firmware_version: dp.firmware_version.clone(),
+                vendor_profile_id: dp.vendor_profile_id as u32,
                 supported_uplink_data_rates: dp
                     .supported_uplink_data_rates
                     .iter()
@@ -316,6 +317,12 @@ impl DeviceProfileService for DeviceProfile {
                 validator::ValidateDeviceProfilesAccess::new(validator::Flag::List, None, true),
             )
             .await?;
+
+        if req.vendor_id > u16::MAX as u32 || req.vendor_profile_id > u16::MAX as u32 {
+            return Err(Status::invalid_argument(
+                "TR005 identifiers must be 0..65535",
+            ));
+        }
 
         let dp =
             device_profile::get_by_profile_id(req.vendor_id as i32, req.vendor_profile_id as i32)
@@ -413,6 +420,7 @@ impl DeviceProfileService for DeviceProfile {
                 }),
                 device_id: dp.device_id.map(|v| v.to_string()).unwrap_or_default(),
                 firmware_version: dp.firmware_version.clone(),
+                vendor_profile_id: dp.vendor_profile_id as u32,
                 supported_uplink_data_rates: dp
                     .supported_uplink_data_rates
                     .iter()
@@ -450,8 +458,6 @@ impl DeviceProfileService for DeviceProfile {
                 validator::ValidateDeviceProfileAccess::new(validator::Flag::Update, dp_id),
             )
             .await?;
-
-        let existing = device_profile::get(&dp_id).await.map_err(|e| e.status())?;
 
         // update
         let _ = device_profile::update_preserving_repository_link(device_profile::DeviceProfile {
@@ -570,10 +576,7 @@ impl DeviceProfileService for DeviceProfile {
                     .map(|&v| Some(v as i16))
                     .collect(),
             ),
-            // Vendor-repository fields are not settable via the API; preserve them.
-            device_id: existing.device_id,
-            firmware_version: existing.firmware_version,
-            vendor_profile_id: existing.vendor_profile_id,
+            // Repository link columns are excluded by the storage update.
             ..Default::default()
         })
         .await
@@ -923,7 +926,7 @@ impl DeviceProfileService for DeviceProfile {
         self.validator
             .validate(
                 request.extensions(),
-                validator::ValidateDeviceProfileVendorAccess::new(validator::Flag::Update),
+                validator::ValidateDeviceProfileRepositoryLinkAccess,
             )
             .await?;
         let req = request.get_ref();
@@ -1109,10 +1112,14 @@ fn vendor_from_api(vendor: &api::DeviceProfileVendor) -> Result<device_profile::
     if vendor.name.trim().is_empty() {
         return Err(Status::invalid_argument("vendor name must not be empty"));
     }
+    if vendor.vendor_id > u16::MAX as u32 {
+        return Err(Status::invalid_argument(
+            "vendor_id must be 0..65535 (TR005)",
+        ));
+    }
     Ok(device_profile::Vendor {
         name: vendor.name.clone(),
-        vendor_id: i32::try_from(vendor.vendor_id)
-            .map_err(|_| Status::invalid_argument("vendor_id is too large"))?,
+        vendor_id: vendor.vendor_id as i32,
         ouis: fields::StringVec::new(vendor.ouis.iter().cloned().map(Some).collect()),
         metadata: fields::KeyValue::new(vendor.metadata.clone()),
         ..Default::default()
@@ -1142,6 +1149,10 @@ fn device_from_api(device: &api::DeviceProfileDevice) -> Result<device_profile::
 #[cfg(test)]
 #[path = "device_profile_catalog_test.rs"]
 mod catalog_test;
+
+#[cfg(test)]
+#[path = "device_profile_catalog_review_test.rs"]
+mod catalog_review_test;
 
 #[cfg(test)]
 pub mod test {
@@ -1406,6 +1417,18 @@ pub mod test {
         let get_resp = service.get_device(get_req).await.unwrap();
         let get_resp = get_resp.get_ref();
         assert_eq!(get_resp.device.as_ref().unwrap().id, dp_device_id);
+
+        // Explicitly unlink the global profile before deleting its catalog model.
+        service
+            .set_repository_link(get_request(
+                &u.id,
+                api::SetDeviceProfileRepositoryLinkRequest {
+                    id: dp_vendor.id.to_string(),
+                    ..Default::default()
+                },
+            ))
+            .await
+            .unwrap();
 
         // delete device
         let del_req = get_request(

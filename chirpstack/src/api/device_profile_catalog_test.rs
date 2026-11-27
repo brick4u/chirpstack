@@ -4,13 +4,13 @@ use crate::storage::{api_key, tenant, user};
 use crate::test;
 use tonic::Code;
 
-fn request<T>(auth: &AuthID, value: T) -> Request<T> {
+pub(super) fn request<T>(auth: &AuthID, value: T) -> Request<T> {
     let mut req = Request::new(value);
     req.extensions_mut().insert(auth.clone());
     req
 }
 
-async fn admin() -> AuthID {
+pub(super) async fn admin() -> AuthID {
     let user = user::create(user::User {
         email: "catalog-admin@example.com".into(),
         is_active: true,
@@ -22,7 +22,7 @@ async fn admin() -> AuthID {
     AuthID::User(*user.id)
 }
 
-async fn seed() -> (device_profile::Device, device_profile::DeviceProfile) {
+pub(super) async fn seed() -> (device_profile::Device, device_profile::DeviceProfile) {
     let vendor = device_profile::create_vendor(device_profile::Vendor {
         name: "Sontex".into(),
         vendor_id: 123,
@@ -47,7 +47,7 @@ async fn seed() -> (device_profile::Device, device_profile::DeviceProfile) {
     (model, profile)
 }
 
-fn link(
+pub(super) fn link(
     profile: &device_profile::DeviceProfile,
     model: &device_profile::Device,
 ) -> api::SetDeviceProfileRepositoryLinkRequest {
